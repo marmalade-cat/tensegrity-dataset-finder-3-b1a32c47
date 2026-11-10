@@ -1,0 +1,131 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <title>Tensegrity Dataset Finder (prototype)</title>
+  <style>
+    body{font-family:system-ui,Segoe UI,Arial;max-width:860px;margin:24px}
+    textarea{width:100%;height:160px;font-family:monospace}
+    pre{background:#f6f6f8;padding:10px;overflow:auto}
+    button{padding:8px 12px}
+    .row{display:flex;gap:8px}
+    .result{border:1px solid #ddd;padding:8px;margin:8px 0}
+    .ok{color:green}.bad{color:crimson}
+  </style>
+</head>
+<body>
+  <h2>Tensegrity Dataset Finder — prototype</h2>
+  <p>I live in a small museum and keep a research notebook. This page extracts URLs from pasted article HTML/text, tries to fetch each URL, and validates CSV/JSON files. It computes SHA-256 checksums and summarizes simple schemas.</p>
+
+  <label>Paste article HTML or text here:</label>
+  <textarea id="input" placeholder="Paste Nature article HTML or africavernaculararchitecture.com page HTML..."></textarea>
+  <div class="row" style="margin-top:8px">
+    <button id="scan">Scan links</button>
+    <button id="clear">Clear</button>
+  </div>
+  <div id="links"></div>
+  <h3>Results</h3>
+  <div id="results"></div>
+
+<script>
+async function sha256hex(buffer){
+  const hash = await crypto.subtle.digest('SHA-256', buffer);
+  const bytes = new Uint8Array(hash);
+  return Array.from(bytes).map(b=>b.toString(16).padStart(2,'0')).join('');
+}
+
+function extractUrls(text){
+  const urls = new Set();
+  // find href="..." and plain http(s) links
+  const hrefRe = /href\s*=\s*\"([^\"]+)\"/gi;
+  let m; while((m=hrefRe.exec(text))){ urls.add(m[1]); }
+  const urlRe = /https?:\/\/[^\s'"<>]+/gi;
+  while((m=urlRe.exec(text))){ urls.add(m[0]); }
+  return Array.from(urls).filter(u=>u.length<2000);
+}
+
+function shortType(m){
+  if(!m) return 'unknown';
+  if(m.includes('csv')) return 'csv';
+  if(m.includes('json')) return 'json';
+  if(m.includes('text')) return 'text';
+  return m.split('/')[0] || m;
+}
+
+async function validateCsv(text){
+  const lines = text.replace(/\r/g,'').split('\n').filter(Boolean);
+  if(lines.length===0) return {valid:false,reason:'empty'};
+  const header = lines[0].split(/,|\t/).map(s=>s.trim());
+  const rowCounts = lines.slice(1).map(l=>l.split(/,|\t/).length);
+  const consistent = rowCounts.every(c=>c===header.length);
+  return {valid:consistent,header,rows:lines.length-1};
+}
+
+function validateJson(text){
+  try{
+    const v = JSON.parse(text);
+    if(Array.isArray(v) && v.length>0 && typeof v[0]==='object'){
+      const keys = Array.from(new Set(v.flatMap(o=>Object.keys(o))));
+      return {valid:true,type:'array',keys,rows:v.length};
+    }
+    if(typeof v==='object'){
+      return {valid:true,type:'object',keys:Object.keys(v).slice(0,20)};
+    }
+    return {valid:false,reason:'JSON not object/array'};
+  }catch(e){ return {valid:false,reason:'invalid JSON'} }
+}
+
+async function inspectUrl(url, out){
+  out.innerHTML += `<div class=result><b>${url}</b> — fetching...</div>`;
+  const container = out.lastElementChild;
+  try{
+    const res = await fetch(url, {cache:'no-store'});
+    const ct = res.headers.get('content-type') || '';
+    const buf = await res.arrayBuffer();
+    const hex = await sha256hex(buf);
+    const text = new TextDecoder().decode(buf);
+    let report = {url, status: res.status, contentType: ct, checksum: hex};
+    if(ct.includes('csv') || url.match(/\.csv(\?|$)/i)){
+      const v = await validateCsv(text);
+      report.kind='csv'; report.validation=v;
+    } else if(ct.includes('json') || url.match(/\.json(\?|$)/i)){
+      const v = await validateJson(text);
+      report.kind='json'; report.validation=v;
+    } else {
+      // try both heuristics
+      if(text.trim().startsWith('{')||text.trim().startsWith('[')){
+        report.kind='json'; report.validation = await validateJson(text);
+      } else if(text.includes(',')||text.includes('\n')){
+        report.kind='csv'; report.validation = await validateCsv(text);
+      } else {
+        report.kind='other'; report.size=buf.byteLength;
+      }
+    }
+    container.innerHTML = `<div class=result><b>${url}</b><div>HTTP: ${res.status}</div><div>Type: ${ct}</div><div>SHA-256: ${hex}</div><pre>${JSON.stringify(report.validation||{size:report.size},null,2)}</pre></div>`;
+  }catch(err){
+    container.innerHTML = `<div class=result><b>${url}</b> <span class=bad>fetch error:</span> ${err.message}</div>`;
+  }
+}
+
+document.getElementById('scan').addEventListener('click', async ()=>{
+  const text = document.getElementById('input').value;
+  const linksDiv = document.getElementById('links');
+  const results = document.getElementById('results');
+  linksDiv.innerHTML = '';
+  results.innerHTML = '';
+  const urls = extractUrls(text);
+  if(urls.length===0){ linksDiv.textContent = 'No URLs found.'; return; }
+  const list = document.createElement('ol');
+  urls.forEach(u=>{ const li=document.createElement('li'); li.textContent=u; list.appendChild(li); });
+  linksDiv.appendChild(list);
+  for(const u of urls){
+    await inspectUrl(u, results);
+  }
+});
+
+document.getElementById('clear').addEventListener('click', ()=>{
+  document.getElementById('input').value=''; document.getElementById('links').innerHTML=''; document.getElementById('results').innerHTML='';
+});
+</script>
+</body>
+</html>
